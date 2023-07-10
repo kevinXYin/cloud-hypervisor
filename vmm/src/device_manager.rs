@@ -11,7 +11,7 @@
 
 use crate::config::{
     ConsoleOutputMode, DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig,
-    VdpaConfig, VhostMode, VmConfig, VsockConfig,
+    VdpaConfig, VhostMode, VmConfig, VsockConfig, NydusPmemConfig,
 };
 use crate::cpu::{CpuManager, CPU_MANAGER_ACPI_SIZE};
 use crate::device_tree::{DeviceNode, DeviceTree};
@@ -53,7 +53,7 @@ use devices::{
 use hypervisor::{HypervisorType, IoEventAddress};
 use libc::{
     cfmakeraw, isatty, tcgetattr, tcsetattr, termios, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED,
-    O_TMPFILE, PROT_READ, PROT_WRITE, TCSANOW,
+    MAP_ANONYMOUS, MAP_FAILED, MAP_FIXED ,O_TMPFILE, PROT_READ, PROT_WRITE, TCSANOW,
 };
 use pci::{
     DeviceRelocation, PciBarRegionType, PciBdf, PciDevice, VfioPciDevice, VfioUserDmaMapping,
@@ -69,6 +69,7 @@ use std::num::Wrapping;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
+use std::ptr::null_mut;
 use std::result;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -2606,6 +2607,200 @@ impl DeviceManager {
         Ok(devices)
     }
 
+    fn make_virtio_nydus_pmem_device(
+        &mut self,
+        nydus_pmem_cfg: &mut NydusPmemConfig,
+    ) -> DeviceManagerResult<MetaVirtioDevice> {
+        let id = if let Some(id) = &nydus_pmem_cfg.id {
+            id.clone()
+        } else {
+            let id = self.next_device_name(PMEM_DEVICE_NAME_PREFIX)?;
+            nydus_pmem_cfg.id = Some(id.clone());
+            id
+        };
+
+        info!("Creating nydus-pmem device: {:?}", nydus_pmem_cfg);
+
+        let mut node = device_node!(id);
+
+        // Look for the id in the device tree. If it can be found, that means
+        // the device is being restored, otherwise it's created from scratch.
+        let region_range = if let Some(node) = self.device_tree.lock().unwrap().get(&id) {
+            info!("Restoring virtio-pmem {} resources", id);
+
+            let mut region_range: Option<(u64, u64)> = None;
+            for resource in node.resources.iter() {
+                match resource {
+                    Resource::MmioAddressRange { base, size } => {
+                        if region_range.is_some() {
+                            return Err(DeviceManagerError::ResourceAlreadyExists);
+                        }
+
+                        region_range = Some((*base, *size));
+                    }
+                    _ => {
+                        error!("Unexpected resource {:?} for {}", resource, id);
+                    }
+                }
+            }
+
+            if region_range.is_none() {
+                return Err(DeviceManagerError::MissingVirtioPmemResources);
+            }
+
+            region_range
+        } else {
+            None
+        };
+
+        if nydus_pmem_cfg.size % 0x20_0000 != 0 {
+            return Err(DeviceManagerError::PmemRangeAllocation);
+        }
+
+        // check & prepare blob entry
+        let mut blob_entrys = Vec::new();
+        let mut pos = 0;
+        for entry in nydus_pmem_cfg.file_entrys.iter() {
+            let mut file = OpenOptions::new()
+                    .read(true)
+                    .open(&entry.file)
+                    .map_err(DeviceManagerError::PmemFileOpen)?;
+            let fsize = file.seek(SeekFrom::End(0))
+                    .map_err(DeviceManagerError::PmemFileSetLen)?;
+
+            if entry.offset < pos {
+                return Err(DeviceManagerError::PmemRangeAllocation);
+            }
+            pos = entry.offset + fsize;
+            if pos > nydus_pmem_cfg.size {
+                return Err(DeviceManagerError::PmemRangeAllocation);
+            }
+
+            blob_entrys.push((file, fsize, entry.offset));
+        }
+
+        let addr = unsafe {
+            libc::mmap(
+                null_mut(),
+                nydus_pmem_cfg.size as usize,
+                PROT_READ,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if addr == MAP_FAILED {
+            return Err(DeviceManagerError::AllocateIrq);
+        }
+
+        let prot = PROT_READ;
+        let flag = MAP_NORESERVE | MAP_FIXED | MAP_SHARED;
+        let mut files = Vec::new();
+        for (file,fsize, offset) in blob_entrys {
+            let addr_pos = unsafe {addr.offset(offset as isize)};
+            let ret = unsafe {
+                libc::mmap(
+                    addr_pos as *mut libc::c_void,
+                    fsize as usize,
+                    prot,
+                    flag,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            if ret == libc::MAP_FAILED {
+                return Err(DeviceManagerError::FsRangeAllocation);
+            }
+            files.push(file);
+        }
+
+        let mmap_region = unsafe {
+            MmapRegion::build_raw(addr as *mut u8, nydus_pmem_cfg.size as usize, prot,flag)
+            .map_err(DeviceManagerError::NewMmapRegion)?
+        };
+
+        let (region_base, region_size) = if let Some((base, size)) = region_range {
+            // The memory needs to be 2MiB aligned in order to support
+            // hugepages.
+            self.pci_segments[nydus_pmem_cfg.pci_segment as usize]
+                .allocator
+                .lock()
+                .unwrap()
+                .allocate(
+                    Some(GuestAddress(base)),
+                    size as GuestUsize,
+                    Some(0x0020_0000),
+                )
+                .ok_or(DeviceManagerError::PmemRangeAllocation)?;
+
+            (base, size)
+        } else {
+            // The memory needs to be 2MiB aligned in order to support
+            // hugepages.
+            let base = self.pci_segments[nydus_pmem_cfg.pci_segment as usize]
+                .allocator
+                .lock()
+                .unwrap()
+                .allocate(None, mmap_region.size() as GuestUsize, Some(0x0020_0000))
+                .ok_or(DeviceManagerError::PmemRangeAllocation)?;
+
+            (base.raw_value(), mmap_region.size() as u64)
+        };
+
+        let host_addr: u64 = mmap_region.as_ptr() as u64;
+
+        let mem_slot = self
+            .memory_manager
+            .lock()
+            .unwrap()
+            .create_userspace_mapping(region_base, region_size, host_addr, false, false, false)
+            .map_err(DeviceManagerError::MemoryManager)?;
+
+        let mapping = virtio_devices::UserspaceMapping {
+            host_addr,
+            mem_slot,
+            addr: GuestAddress(region_base),
+            len: region_size,
+            mergeable: false,
+        };
+
+        let virtio_pmem_device = Arc::new(Mutex::new(
+            virtio_devices::Pmem::new(
+                id.clone(),
+                files,
+                GuestAddress(region_base),
+                mapping,
+                mmap_region,
+                self.force_iommu | nydus_pmem_cfg.iommu,
+                self.seccomp_action.clone(),
+                self.exit_evt
+                    .try_clone()
+                    .map_err(DeviceManagerError::EventFd)?,
+                versioned_state_from_id(self.snapshot.as_ref(), id.as_str())
+                    .map_err(DeviceManagerError::RestoreGetState)?,
+            )
+            .map_err(DeviceManagerError::CreateVirtioPmem)?,
+        ));
+
+        // Update the device tree with correct resource information and with
+        // the migratable device.
+        node.resources.push(Resource::MmioAddressRange {
+            base: region_base,
+            size: region_size,
+        });
+        node.migratable = Some(Arc::clone(&virtio_pmem_device) as Arc<Mutex<dyn Migratable>>);
+        self.device_tree.lock().unwrap().insert(id.clone(), node);
+
+        Ok(MetaVirtioDevice {
+            virtio_device: Arc::clone(&virtio_pmem_device)
+                as Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
+            iommu: nydus_pmem_cfg.iommu,
+            id,
+            pci_segment: nydus_pmem_cfg.pci_segment,
+            dma_handler: None,
+        })
+    }
+
     fn make_virtio_pmem_device(
         &mut self,
         pmem_cfg: &mut PmemConfig,
@@ -2744,7 +2939,7 @@ impl DeviceManager {
         let virtio_pmem_device = Arc::new(Mutex::new(
             virtio_devices::Pmem::new(
                 id.clone(),
-                file,
+                vec![file],
                 GuestAddress(region_base),
                 mapping,
                 mmap_region,
@@ -4093,6 +4288,17 @@ impl DeviceManager {
         self.validate_identifier(&fs_cfg.id)?;
 
         let device = self.make_virtio_fs_device(fs_cfg)?;
+        self.hotplug_virtio_pci_device(device)
+    }
+
+    pub fn add_nydus_pmem(&mut self, nydus_pmem_cfg: &mut NydusPmemConfig) -> DeviceManagerResult<PciDeviceInfo> {
+        self.validate_identifier(&nydus_pmem_cfg.id)?;
+
+        if nydus_pmem_cfg.iommu && !self.is_iommu_segment(nydus_pmem_cfg.pci_segment) {
+            return Err(DeviceManagerError::InvalidIommuHotplug);
+        }
+
+        let device = self.make_virtio_nydus_pmem_device(nydus_pmem_cfg)?;
         self.hotplug_virtio_pci_device(device)
     }
 

@@ -11,7 +11,7 @@ use crate::api::{
     vm_add_vdpa, vm_add_vsock, vm_boot, vm_counters, vm_create, vm_delete, vm_info, vm_pause,
     vm_power_button, vm_reboot, vm_receive_migration, vm_remove_device, vm_resize, vm_resize_zone,
     vm_restore, vm_resume, vm_send_migration, vm_shutdown, vm_snapshot, vmm_ping, vmm_shutdown,
-    ApiRequest, VmAction, VmConfig,
+    ApiRequest, VmAction, VmConfig, vm_add_nydus_pmem,
 };
 use crate::config::NetConfig;
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
@@ -94,6 +94,11 @@ impl EndpointHandler for VmActionHandler {
                     Arc::new(serde_json::from_slice(body.raw())?),
                 ),
                 AddFs(_) => vm_add_fs(
+                    api_notifier,
+                    api_sender,
+                    Arc::new(serde_json::from_slice(body.raw())?),
+                ),
+                AddNydusPmem(_) => vm_add_nydus_pmem(
                     api_notifier,
                     api_sender,
                     Arc::new(serde_json::from_slice(body.raw())?),

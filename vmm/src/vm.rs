@@ -13,7 +13,7 @@
 
 use crate::config::{
     add_to_config, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, NetConfig, PmemConfig,
-    UserDeviceConfig, ValidationError, VdpaConfig, VmConfig, VsockConfig,
+    NydusPmemConfig, UserDeviceConfig, ValidationError, VdpaConfig, VmConfig, VsockConfig,
 };
 use crate::config::{NumaConfig, PayloadConfig};
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
@@ -1433,6 +1433,11 @@ impl Vm {
             net.retain(|dev| dev.id.as_ref() != Some(&id));
         }
 
+        // Remove if nydus pmem device
+        if let Some(nydus_pmem) = config.nydus_pmem.as_mut() {
+            nydus_pmem.retain(|dev| dev.id.as_ref() != Some(&id));
+        }
+
         // Remove if pmem device
         if let Some(pmem) = config.pmem.as_mut() {
             pmem.retain(|dev| dev.id.as_ref() != Some(&id));
@@ -1495,6 +1500,30 @@ impl Vm {
         {
             let mut config = self.config.lock().unwrap();
             add_to_config(&mut config.fs, fs_cfg);
+        }
+
+        self.device_manager
+            .lock()
+            .unwrap()
+            .notify_hotplug(AcpiNotificationFlags::PCI_DEVICES_CHANGED)
+            .map_err(Error::DeviceManager)?;
+
+        Ok(pci_device_info)
+    }
+
+    pub fn add_nydus_pmem(&mut self, mut nydus_pmem_cfg: NydusPmemConfig) -> Result<PciDeviceInfo> {
+        let pci_device_info = self
+        .device_manager
+        .lock()
+        .unwrap()
+        .add_nydus_pmem(&mut nydus_pmem_cfg)
+        .map_err(Error::DeviceManager)?;
+
+        // Update VmConfig by adding the new device. This is important to
+        // ensure the device would be created in case of a reboot.
+        {
+            let mut config = self.config.lock().unwrap();
+            add_to_config(&mut config.nydus_pmem, nydus_pmem_cfg);
         }
 
         self.device_manager

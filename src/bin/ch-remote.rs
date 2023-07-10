@@ -23,6 +23,7 @@ enum Error {
     AddDeviceConfig(vmm::config::Error),
     AddDiskConfig(vmm::config::Error),
     AddFsConfig(vmm::config::Error),
+    AddNydusPmemConfig(vmm::config::Error),
     AddPmemConfig(vmm::config::Error),
     AddNetConfig(vmm::config::Error),
     AddUserDeviceConfig(vmm::config::Error),
@@ -44,6 +45,7 @@ impl fmt::Display for Error {
             AddDeviceConfig(e) => write!(f, "Error parsing device syntax: {e}"),
             AddDiskConfig(e) => write!(f, "Error parsing disk syntax: {e}"),
             AddFsConfig(e) => write!(f, "Error parsing filesystem syntax: {e}"),
+            AddNydusPmemConfig(e) => write!(f, "Error parsing nydus persistent memory syntax: {e}"),
             AddPmemConfig(e) => write!(f, "Error parsing persistent memory syntax: {e}"),
             AddNetConfig(e) => write!(f, "Error parsing network syntax: {e}"),
             AddUserDeviceConfig(e) => write!(f, "Error parsing user device syntax: {e}"),
@@ -174,6 +176,18 @@ fn add_fs_api_command(socket: &mut UnixStream, config: &str) -> Result<(), Error
         "PUT",
         "add-fs",
         Some(&serde_json::to_string(&fs_config).unwrap()),
+    )
+    .map_err(Error::ApiClient)
+}
+
+fn add_nydus_pmem_api_command(socket: &mut UnixStream, config: &str) -> Result<(), Error> {
+    let nydus_pmem_config = vmm::config::NydusPmemConfig::parse(config).map_err(Error::AddNydusPmemConfig)?;
+
+    simple_api_command(
+        socket,
+        "PUT",
+        "add-nydus-pmem",
+        Some(&serde_json::to_string(&nydus_pmem_config).unwrap()),
     )
     .map_err(Error::ApiClient)
 }
@@ -372,6 +386,9 @@ fn do_command(toplevel: &TopLevel) -> Result<(), Error> {
             add_disk_api_command(&mut socket, &config.disk_config)
         }
         SubCommandEnum::AddFs(ref config) => add_fs_api_command(&mut socket, &config.fs_config),
+        SubCommandEnum::AddNydusPmem(ref config) => {
+            add_nydus_pmem_api_command(&mut socket, &config.nydus_pmem_config)
+        }
         SubCommandEnum::AddPmem(ref config) => {
             add_pmem_api_command(&mut socket, &config.pmem_config)
         }
@@ -427,6 +444,7 @@ enum SubCommandEnum {
     AddDevice(AddDeviceSubcommand),
     AddDisk(AddDiskSubcommand),
     AddFs(AddFsSubcommand),
+    AddNydusPmem(AddNydusPmemSubcommand),
     AddPmem(AddPmemSubcommand),
     AddNet(AddNetSubcommand),
     AddUserDevice(AddUserDeviceSubcommand),
@@ -480,6 +498,15 @@ struct AddFsSubcommand {
     #[argh(positional)]
     /// virtio-fs config
     fs_config: String,
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(subcommand, name = "add-nydus-pmem")]
+/// Add virtio-fs backed fs device
+struct AddNydusPmemSubcommand {
+    #[argh(positional)]
+    /// pmem config
+    nydus_pmem_config: String,
 }
 
 #[derive(FromArgs, PartialEq, Debug)]

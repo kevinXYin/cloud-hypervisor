@@ -155,7 +155,7 @@ impl Request {
 struct PmemEpollHandler {
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
     queue: Queue,
-    disk: File,
+    disks: Vec<File>,
     interrupt_cb: Arc<dyn VirtioInterrupt>,
     queue_evt: EventFd,
     kill_evt: EventFd,
@@ -169,13 +169,14 @@ impl PmemEpollHandler {
         while let Some(mut desc_chain) = self.queue.pop_descriptor_chain(self.mem.memory()) {
             let len = match Request::parse(&mut desc_chain, self.access_platform.as_ref()) {
                 Ok(ref req) if (req.type_ == RequestType::Flush) => {
-                    let status_code = match self.disk.sync_all() {
-                        Ok(()) => VIRTIO_PMEM_RESP_TYPE_OK,
-                        Err(e) => {
+                    let mut status_code = VIRTIO_PMEM_RESP_TYPE_OK;
+                    for disk in self.disks.iter() {
+                        if let Err(e) = disk.sync_all() {
                             error!("failed flushing disk image: {}", e);
-                            VIRTIO_PMEM_RESP_TYPE_EIO
+                            status_code = VIRTIO_PMEM_RESP_TYPE_EIO;
+                            break;
                         }
-                    };
+                    }
 
                     let resp = VirtioPmemResp { ret: status_code };
                     match desc_chain.memory().write_obj(resp, req.status_addr) {
@@ -268,7 +269,7 @@ impl EpollHelperHandler for PmemEpollHandler {
 pub struct Pmem {
     common: VirtioCommon,
     id: String,
-    disk: Option<File>,
+    disks: Option<Vec<File>>,
     config: VirtioPmemConfig,
     mapping: UserspaceMapping,
     seccomp_action: SeccompAction,
@@ -292,7 +293,7 @@ impl Pmem {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
-        disk: File,
+        disks: Vec<File>,
         addr: GuestAddress,
         mapping: UserspaceMapping,
         _region: MmapRegion,
@@ -335,7 +336,7 @@ impl Pmem {
                 ..Default::default()
             },
             id,
-            disk: Some(disk),
+            disks: Some(disks),
             config,
             mapping,
             seccomp_action,
@@ -397,18 +398,22 @@ impl VirtioDevice for Pmem {
     ) -> ActivateResult {
         self.common.activate(&queues, &interrupt_cb)?;
         let (kill_evt, pause_evt) = self.common.dup_eventfds();
-        if let Some(disk) = self.disk.as_ref() {
-            let disk = disk.try_clone().map_err(|e| {
-                error!("failed cloning pmem disk: {}", e);
-                ActivateError::BadActivate
-            })?;
+        if let Some(disks) = &self.disks {
+            let mut cloned_disks = Vec::new();
+            for disk in disks {
+                let cloned_disk = disk.try_clone().map_err(|e| {
+                    error!("failed cloning pmem disk: {}", e);
+                    ActivateError::BadActivate
+                })?;
+                cloned_disks.push(cloned_disk);
+            }
 
             let (_, queue, queue_evt) = queues.remove(0);
 
             let mut handler = PmemEpollHandler {
                 mem,
                 queue,
-                disk,
+                disks:cloned_disks,
                 interrupt_cb,
                 queue_evt,
                 kill_evt,

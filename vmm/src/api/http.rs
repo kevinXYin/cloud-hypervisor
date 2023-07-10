@@ -160,6 +160,10 @@ pub static HTTP_ROUTES: Lazy<HttpRoutes> = Lazy::new(|| {
         Box::new(VmActionHandler::new(VmAction::AddNet(Arc::default()))),
     );
     r.routes.insert(
+        endpoint!("/vm.add-nydus-pmem"),
+        Box::new(VmActionHandler::new(VmAction::AddNydusPmem(Arc::default()))),
+    );    
+    r.routes.insert(
         endpoint!("/vm.add-pmem"),
         Box::new(VmActionHandler::new(VmAction::AddPmem(Arc::default()))),
     );

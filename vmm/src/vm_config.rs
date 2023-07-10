@@ -425,6 +425,24 @@ pub struct PmemConfig {
     #[serde(default)]
     pub pci_segment: u16,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct NydusFileEntry {
+    pub file: PathBuf,
+    pub offset: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub struct NydusPmemConfig {
+    pub file_entrys: Vec<NydusFileEntry>,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub iommu: bool,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub pci_segment: u16,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ConsoleOutputMode {
@@ -576,6 +594,7 @@ pub struct VmConfig {
     pub rng: RngConfig,
     pub balloon: Option<BalloonConfig>,
     pub fs: Option<Vec<FsConfig>>,
+    pub nydus_pmem: Option<Vec<NydusPmemConfig>>,
     pub pmem: Option<Vec<PmemConfig>>,
     #[serde(default = "default_serial")]
     pub serial: ConsoleConfig,

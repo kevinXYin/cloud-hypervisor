@@ -189,6 +189,10 @@ pub struct TopLevel {
     /// tag=<tag_name>,socket=<socket_path>,num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,id=<device_id>,pci_segment=<segment_id>
     fs: Vec<String>,
 
+    #[argh(option, long = "nydus-pmem")]
+    /// TBD
+    nydus_pmem: Vec<String>,
+
     #[argh(option, long = "pmem")]
     /// file=<backing_file_path>,size=<persistent_memory_size>,iommu=on|off,discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>
     pmem: Vec<String>,
@@ -303,7 +307,11 @@ impl TopLevel {
         } else {
             None
         };
-
+        let nydus_pmem = if !self.nydus_pmem.is_empty() {
+            Some(self.nydus_pmem.iter().map(|x| x.as_str()).collect())
+        } else {
+            None
+        };
         let pmem = if !self.pmem.is_empty() {
             Some(self.pmem.iter().map(|x| x.as_str()).collect())
         } else {
@@ -357,6 +365,7 @@ impl TopLevel {
             rng,
             balloon,
             fs,
+            nydus_pmem,
             pmem,
             serial,
             console,
@@ -715,6 +724,7 @@ mod unit_tests {
             },
             balloon: None,
             fs: None,
+            nydus_pmem: None,
             pmem: None,
             serial: ConsoleConfig {
                 file: None,

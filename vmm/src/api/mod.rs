@@ -36,7 +36,7 @@ pub mod http_endpoint;
 
 use crate::config::{
     DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig, UserDeviceConfig,
-    VdpaConfig, VmConfig, VsockConfig,
+    VdpaConfig, VmConfig, VsockConfig, NydusPmemConfig,
 };
 use crate::device_tree::DeviceTree;
 use crate::vm::{Error as VmError, VmState};
@@ -302,6 +302,9 @@ pub enum ApiRequest {
     /// Add a fs to the VM.
     VmAddFs(Arc<FsConfig>, Sender<ApiResponse>),
 
+    /// Add a nydus pmem device to the VM.
+    VmAddNydusPmem(Arc<NydusPmemConfig>, Sender<ApiResponse>),
+
     /// Add a pmem device to the VM.
     VmAddPmem(Arc<PmemConfig>, Sender<ApiResponse>),
 
@@ -386,6 +389,9 @@ pub enum VmAction {
     /// Add filesystem
     AddFs(Arc<FsConfig>),
 
+    /// Add nydus pmem
+    AddNydusPmem(Arc<NydusPmemConfig>),
+
     /// Add pmem
     AddPmem(Arc<PmemConfig>),
 
@@ -449,6 +455,7 @@ fn vm_action(
         AddDevice(v) => ApiRequest::VmAddDevice(v, response_sender),
         AddDisk(v) => ApiRequest::VmAddDisk(v, response_sender),
         AddFs(v) => ApiRequest::VmAddFs(v, response_sender),
+        AddNydusPmem(v) => ApiRequest::VmAddNydusPmem(v, response_sender),
         AddPmem(v) => ApiRequest::VmAddPmem(v, response_sender),
         AddNet(v) => ApiRequest::VmAddNet(v, response_sender),
         AddVdpa(v) => ApiRequest::VmAddVdpa(v, response_sender),
@@ -656,6 +663,14 @@ pub fn vm_add_fs(
     data: Arc<FsConfig>,
 ) -> ApiResult<Option<Body>> {
     vm_action(api_evt, api_sender, VmAction::AddFs(data))
+}
+
+pub fn vm_add_nydus_pmem(
+    api_evt: EventFd,
+    api_sender: Sender<ApiRequest>,
+    data: Arc<NydusPmemConfig>,
+) -> ApiResult<Option<Body>> {
+    vm_action(api_evt, api_sender, VmAction::AddNydusPmem(data))
 }
 
 pub fn vm_add_pmem(

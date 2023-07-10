@@ -26,6 +26,8 @@ pub enum Error {
     ParseFsTagMissing,
     /// Filesystem socket is missing
     ParseFsSockMissing,
+    /// Failed parsing Nydus pmem file entrys parameters
+    ParseNydusPmemFileEntrys(OptionParserError),
     /// Missing persistent memory file parameter.
     ParsePmemFileMissing,
     /// Missing vsock socket path parameter.
@@ -302,6 +304,7 @@ impl fmt::Display for Error {
             ParseFsSockMissing => write!(f, "Error parsing --fs: socket missing"),
             ParseFsTagMissing => write!(f, "Error parsing --fs: tag missing"),
             ParsePersistentMemory(o) => write!(f, "Error parsing --pmem: {o}"),
+            ParseNydusPmemFileEntrys(o) => write!(f, "Error parsing --nydus-pmem: {o}"),
             ParsePmemFileMissing => write!(f, "Error parsing --pmem: file missing"),
             ParseVsock(o) => write!(f, "Error parsing --vsock: {o}"),
             ParseVsockCidMissing => write!(f, "Error parsing --vsock: cid missing"),
@@ -363,6 +366,7 @@ pub struct VmParams<'a> {
     pub rng: &'a str,
     pub balloon: Option<&'a str>,
     pub fs: Option<Vec<&'a str>>,
+    pub nydus_pmem: Option<Vec<&'a str>>,
     pub pmem: Option<Vec<&'a str>>,
     pub serial: &'a str,
     pub console: &'a str,
@@ -1253,6 +1257,72 @@ impl FsConfig {
     }
 }
 
+impl NydusPmemConfig {
+    pub fn parse(nydus_pmem: &str) -> Result<Self> {
+        let mut parser = OptionParser::new();
+        parser
+            .add("size")
+            .add("file_entrys")
+            .add("iommu")
+            .add("id")
+            .add("pci_segment");
+        parser.parse(nydus_pmem).map_err(Error::ParsePersistentMemory)?;
+
+        let file_entrys = parser
+            .convert::<Tuple<String, u64>>("file_entrys")
+            .map_err(Error::ParseNydusPmemFileEntrys)?
+            .map(|v| {
+                v.0.iter()
+                    .map(|(e1, e2)| NydusFileEntry {
+                        file:PathBuf::from(e1),
+                        offset: *e2,
+                    })
+                    .collect()
+            })
+            .ok_or(Error::ParsePmemFileMissing)?;
+        let size = parser
+            .convert::<ByteSized>("size")
+            .map_err(Error::ParsePersistentMemory)?
+            .map(|v| v.0)
+            .ok_or(Error::ParsePmemFileMissing)?;
+        let iommu = parser
+            .convert::<Toggle>("iommu")
+            .map_err(Error::ParsePersistentMemory)?
+            .unwrap_or(Toggle(false))
+            .0;
+        let id = parser.get("id");
+        let pci_segment = parser
+            .convert("pci_segment")
+            .map_err(Error::ParsePersistentMemory)?
+            .unwrap_or_default();
+
+        Ok(NydusPmemConfig {
+            file_entrys,
+            size,
+            iommu,
+            id,
+            pci_segment,
+        })
+    }
+
+
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl PmemConfig {
     pub fn parse(pmem: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -1786,6 +1856,15 @@ impl VmConfig {
             }
         }
 
+        if let Some(nydus_pmems) = &self.nydus_pmem {
+            for nydus_pmem in nydus_pmems {
+                nydus_pmem.validate(self)?;
+                self.iommu |= nydus_pmem.iommu;
+
+                Self::validate_identifier(&mut id_list, &nydus_pmem.id)?;
+            }
+        }
+
         if let Some(pmems) = &self.pmem {
             for pmem in pmems {
                 pmem.validate(self)?;
@@ -1971,6 +2050,16 @@ impl VmConfig {
             fs = Some(fs_config_list);
         }
 
+        let mut nydus_pmem: Option<Vec<NydusPmemConfig>> = None;
+        if let Some(nydus_pmem_list) = &vm_params.nydus_pmem {
+            let mut nydus_pmem_config_list = Vec::new();
+            for item in nydus_pmem_list.iter() {
+                let nydus_pmem_config = NydusPmemConfig::parse(item)?;
+                nydus_pmem_config_list.push(nydus_pmem_config);
+            }
+            nydus_pmem = Some(nydus_pmem_config_list);
+        }
+        
         let mut pmem: Option<Vec<PmemConfig>> = None;
         if let Some(pmem_list) = &vm_params.pmem {
             let mut pmem_config_list = Vec::new();
@@ -2077,6 +2166,7 @@ impl VmConfig {
             rng,
             balloon,
             fs,
+            nydus_pmem,
             pmem,
             serial,
             console,
@@ -2131,6 +2221,7 @@ impl Clone for VmConfig {
             rng: self.rng.clone(),
             balloon: self.balloon.clone(),
             fs: self.fs.clone(),
+            nydus_pmem: self.nydus_pmem.clone(),
             pmem: self.pmem.clone(),
             serial: self.serial.clone(),
             console: self.console.clone(),
@@ -2752,6 +2843,7 @@ mod tests {
             },
             balloon: None,
             fs: None,
+            nydus_pmem: None,
             pmem: None,
             serial: ConsoleConfig {
                 file: None,
@@ -3015,6 +3107,11 @@ mod tests {
             iommu_segments: Some(vec![1, 2, 3]),
             ..Default::default()
         });
+        still_valid_config.nydus_pmem = Some(vec![NydusPmemConfig{
+            iommu: true,
+            pci_segment: 1,
+            ..Default::default()
+        }]);
         still_valid_config.pmem = Some(vec![PmemConfig {
             iommu: true,
             pci_segment: 1,

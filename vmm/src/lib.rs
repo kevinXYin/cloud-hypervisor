@@ -14,7 +14,7 @@ use crate::api::{
 };
 use crate::config::{
     add_to_config, DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig,
-    UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
+    UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig, NydusPmemConfig,
 };
 #[cfg(all(target_arch = "x86_64", feature = "guest_debug"))]
 use crate::coredump::GuestDebuggable;
@@ -1046,6 +1046,32 @@ impl Vmm {
         }
     }
 
+    fn vm_add_nydus_pmem(&mut self, nydus_pmem_cfg: NydusPmemConfig) -> result::Result<Option<Vec<u8>>, VmError> {
+        self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
+
+        {
+            // Validate the configuration change in a cloned configuration
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap().clone();
+            add_to_config(&mut config.nydus_pmem, nydus_pmem_cfg.clone());
+            config.validate().map_err(VmError::ConfigValidation)?;
+        }
+
+        if let Some(ref mut vm) = self.vm {
+            let info = vm.add_nydus_pmem(nydus_pmem_cfg).map_err(|e| {
+                error!("Error when adding new pmem device to the VM: {:?}", e);
+                e
+            })?;
+            serde_json::to_vec(&info)
+                .map(Some)
+                .map_err(VmError::SerializeJson)
+        } else {
+            // Update VmConfig by adding the new device.
+            let mut config = self.vm_config.as_ref().unwrap().lock().unwrap();
+            add_to_config(&mut config.nydus_pmem, nydus_pmem_cfg);
+            Ok(None)
+        }
+    }
+
     fn vm_add_pmem(&mut self, pmem_cfg: PmemConfig) -> result::Result<Option<Vec<u8>>, VmError> {
         self.vm_config.as_ref().ok_or(VmError::VmNotCreated)?;
 
@@ -1975,6 +2001,13 @@ impl Vmm {
                                         .map(ApiResponsePayload::VmAction);
                                     sender.send(response).map_err(Error::ApiResponseSend)?;
                                 }
+                                ApiRequest::VmAddNydusPmem(add_pmem_data, sender) => {
+                                    let response = self
+                                        .vm_add_nydus_pmem(add_pmem_data.as_ref().clone())
+                                        .map_err(ApiError::VmAddPmem)
+                                        .map(ApiResponsePayload::VmAction);
+                                    sender.send(response).map_err(Error::ApiResponseSend)?;
+                                }
                                 ApiRequest::VmAddPmem(add_pmem_data, sender) => {
                                     let response = self
                                         .vm_add_pmem(add_pmem_data.as_ref().clone())
@@ -2140,6 +2173,7 @@ mod unit_tests {
             },
             balloon: None,
             fs: None,
+            nydus_pmem: None,
             pmem: None,
             serial: ConsoleConfig {
                 file: None,
